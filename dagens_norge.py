@@ -36,7 +36,7 @@ ANTHROPIC_HEADERS = {
 def fetch_news_text():
     today = datetime.now().strftime("%-d. %B %Y")
     payload = {
-        "model": "claude-sonnet-4-20250514",
+        "model": "claude-sonnet-4-5",
         "max_tokens": 4000,
         "tools": [{"type": "web_search_20250305", "name": "web_search"}],
         "messages": [{
@@ -63,7 +63,7 @@ def fetch_news_text():
 
 def convert_to_json(news_text):
     payload = {
-        "model": "claude-sonnet-4-20250514",
+        "model": "claude-sonnet-4-5",
         "max_tokens": 4000,
         "system": (
             "You are a JSON serializer. You receive news summaries and output ONLY a raw JSON "
