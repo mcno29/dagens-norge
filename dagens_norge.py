@@ -17,6 +17,7 @@ Environment variables (set as GitHub Actions secrets):
 import os
 import json
 import requests
+import time
 from datetime import datetime
 
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
@@ -223,6 +224,7 @@ def main():
     news_text = fetch_news_text()
     print(f"  Got {len(news_text)} characters of news text.")
 
+    time.sleep(10)
     print("Step 2: Converting to JSON...")
     news = convert_to_json(news_text)
     print(f"  Got {len(news['stories'])} stories.")
