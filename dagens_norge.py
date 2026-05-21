@@ -224,7 +224,7 @@ def main():
     news_text = fetch_news_text()
     print(f"  Got {len(news_text)} characters of news text.")
 
-    time.sleep(10)
+    time.sleep(60)
     print("Step 2: Converting to JSON...")
     news = convert_to_json(news_text)
     print(f"  Got {len(news['stories'])} stories.")
