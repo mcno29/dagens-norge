@@ -5,8 +5,11 @@ Fetches the top Norwegian news stories using the Anthropic API,
 formats them into a bilingual (Norwegian + English) HTML email,
 and sends it via Resend.
 
+Single API call version: searches and formats JSON in one request
+to avoid rate limit issues.
+
 Setup:
-    pip install anthropic requests
+    pip install requests
 
 Environment variables (set as GitHub Actions secrets):
     ANTHROPIC_API_KEY   – your Anthropic API key
@@ -17,7 +20,6 @@ Environment variables (set as GitHub Actions secrets):
 import os
 import json
 import requests
-import time
 from datetime import datetime
 
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
@@ -32,79 +34,57 @@ ANTHROPIC_HEADERS = {
 }
 
 
-# ── Step 1: Search for today's news ──────────────────────────────────────────
+# ── Step 1: Search and format in ONE call ─────────────────────────────────────
 
-def fetch_news_text():
+def fetch_news_json():
     today = datetime.now().strftime("%-d. %B %Y")
     payload = {
         "model": "claude-sonnet-4-5",
         "max_tokens": 4000,
         "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+        "system": (
+            "You are a Norwegian news editor and JSON serializer. "
+            "After searching for news, you output ONLY a raw JSON object — "
+            "no preamble, no explanation, no markdown, no code fences. "
+            "Your response starts with { and ends with }. "
+            "Use only straight double quotes. Escape any double quotes inside string values with backslash."
+        ),
         "messages": [{
             "role": "user",
             "content": (
                 f"Search for the 6-8 most important Norwegian news stories today, {today}. "
                 "Use web search to find real articles from NRK, Aftenposten, Dagbladet, VG, E24 "
-                "and similar Norwegian sources. For each story write: the headline in Norwegian, "
-                "what happened, why it matters, current status, the direct article URL, and the "
-                "outlet name. Rank by importance, not recency."
-            )
-        }]
-    }
-    response = requests.post(ANTHROPIC_URL, headers=ANTHROPIC_HEADERS, json=payload)
-    response.raise_for_status()
-    data = response.json()
-    # Extract all text blocks from the response
-    return " ".join(
-        block["text"] for block in data["content"] if block["type"] == "text"
-    )
-
-
-# ── Step 2: Convert to structured JSON ───────────────────────────────────────
-
-def convert_to_json(news_text):
-    payload = {
-        "model": "claude-sonnet-4-5",
-        "max_tokens": 4000,
-        "system": (
-            "You are a JSON serializer. You receive news summaries and output ONLY a raw JSON "
-            "object. No preamble, no explanation, no markdown, no code fences. Your response "
-            "starts with { and ends with }. Use only straight double quotes. Escape any double "
-            "quotes inside string values with backslash."
-        ),
-        "messages": [{
-            "role": "user",
-            "content": (
-                'Convert this news summary into JSON with this exact structure:\n'
-                '{"date":"20. mai 2026","stories":[{"rank":1,"headline":"norsk overskrift",'
+                "and similar Norwegian sources. Then return ONLY this JSON structure:\n"
+                '{"date":"' + today + '","stories":[{"rank":1,"headline":"norsk overskrift",'
                 '"summaryNo":"2-3 norske setninger.","summaryEn":"2-3 English sentences.",'
                 '"category":"Politikk","sourceUrl":"https://...","sourceName":"NRK"}]}\n\n'
-                'Categories must be one of: Politikk, Økonomi, Utenriks, Samfunn, Sport, '
-                'Kultur, Helse, Teknologi\n\n'
-                f'News to convert:\n{news_text}'
+                "Categories must be one of: Politikk, Økonomi, Utenriks, Samfunn, Sport, Kultur, Helse, Teknologi\n"
+                "Rank by importance, not recency. Output ONLY the JSON, nothing else."
             )
         }]
     }
     response = requests.post(ANTHROPIC_URL, headers=ANTHROPIC_HEADERS, json=payload)
     response.raise_for_status()
     data = response.json()
+
+    # Extract text blocks (skip tool_use blocks)
     text = " ".join(
         block["text"] for block in data["content"] if block["type"] == "text"
     )
-    # Extract JSON robustly
+
+    # Robustly extract JSON
     start = text.index("{")
     end = text.rindex("}") + 1
     json_str = text[start:end]
     try:
         return json.loads(json_str)
     except json.JSONDecodeError:
-        # Trim incomplete last story and close
         last = json_str.rfind("},")
         json_str = json_str[:last + 1] + "]}"
         return json.loads(json_str)
 
 
-# ── Step 3: Build HTML email ──────────────────────────────────────────────────
+# ── Step 2: Build HTML email ──────────────────────────────────────────────────
 
 CATEGORY_COLORS = {
     "Politikk": "#2563eb",
@@ -118,7 +98,7 @@ CATEGORY_COLORS = {
 }
 
 def build_html(news):
-    today_nb = datetime.now().strftime("%-d. %B %Y")  # e.g. "21. mai 2026"
+    today_nb = datetime.now().strftime("%-d. %B %Y")
 
     stories_html = ""
     for s in news["stories"]:
@@ -129,7 +109,7 @@ def build_html(news):
                 f'<tr><td style="padding-top:8px;">'
                 f'<a href="{s["sourceUrl"]}" style="font-family:Arial,sans-serif;font-size:12px;'
                 f'color:#c8a96e;text-decoration:none;border-bottom:1px solid #c8a96e;">'
-                f'Les mer hos {s.get("sourceName", "kilden")} →</a></td></tr>'
+                f'Les mer hos {s.get("sourceName", "kilden")} \u2192</a></td></tr>'
             )
         stories_html += f"""
         <tr><td style="padding:0 0 28px 0;">
@@ -147,7 +127,7 @@ def build_html(news):
             </td></tr>
             <tr><td style="padding-top:10px;padding-bottom:4px;">
               <span style="font-family:Arial,sans-serif;font-size:11px;color:#aaa;
-                text-transform:uppercase;letter-spacing:0.5px;">🇳🇴 Norsk</span>
+                text-transform:uppercase;letter-spacing:0.5px;">\U0001f1f3\U0001f1f4 Norsk</span>
             </td></tr>
             <tr><td style="padding-bottom:10px;">
               <span style="font-family:Arial,sans-serif;font-size:14px;color:#333;
@@ -155,7 +135,7 @@ def build_html(news):
             </td></tr>
             <tr><td style="padding-bottom:4px;">
               <span style="font-family:Arial,sans-serif;font-size:11px;color:#aaa;
-                text-transform:uppercase;letter-spacing:0.5px;">🇬🇧 English</span>
+                text-transform:uppercase;letter-spacing:0.5px;">\U0001f1ec\U0001f1e7 English</span>
             </td></tr>
             <tr><td style="padding-bottom:10px;">
               <span style="font-family:Arial,sans-serif;font-size:14px;color:#555;
@@ -178,25 +158,25 @@ def build_html(news):
         <div style="font-family:Arial,sans-serif;font-size:12px;color:#999;margin-top:4px;
           text-transform:uppercase;letter-spacing:1px;">{today_nb}</div>
       </td>
-      <td align="right"><div style="font-family:Georgia,serif;font-size:32px;color:#c8a96e;">§</div></td>
+      <td align="right"><div style="font-family:Georgia,serif;font-size:32px;color:#c8a96e;">\u00a7</div></td>
     </tr></table>
   </td></tr>
   <tr><td style="background:#f5f2ed;padding:12px 36px;border-bottom:1px solid #e8e4dd;">
     <span style="font-family:Arial,sans-serif;font-size:12px;color:#888;">
-      {len(news["stories"])} saker · rangert etter viktighet, ikke publiseringstidspunkt</span>
+      {len(news["stories"])} saker \u00b7 rangert etter viktighet, ikke publiseringstidspunkt</span>
   </td></tr>
   <tr><td style="padding:28px 36px 8px 36px;">
     <table width="100%" cellpadding="0" cellspacing="0">{stories_html}</table>
   </td></tr>
   <tr><td style="background:#f5f2ed;padding:20px 36px;border-top:1px solid #e8e4dd;">
     <span style="font-family:Arial,sans-serif;font-size:11px;color:#aaa;">
-      Laget av Claude · NRK, Aftenposten, Dagbladet og andre norske kilder</span>
+      Laget av Claude \u00b7 NRK, Aftenposten, Dagbladet og andre norske kilder</span>
   </td></tr>
 </table></td></tr></table>
 </body></html>"""
 
 
-# ── Step 4: Send via Resend ───────────────────────────────────────────────────
+# ── Step 3: Send via Resend ───────────────────────────────────────────────────
 
 def send_email(subject, html):
     payload = {
@@ -220,21 +200,16 @@ def send_email(subject, html):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    print("Step 1: Fetching news...")
-    news_text = fetch_news_text()
-    print(f"  Got {len(news_text)} characters of news text.")
-
-    time.sleep(60)
-    print("Step 2: Converting to JSON...")
-    news = convert_to_json(news_text)
+    print("Step 1: Fetching and formatting news (single API call)...")
+    news = fetch_news_json()
     print(f"  Got {len(news['stories'])} stories.")
 
-    print("Step 3: Building email...")
+    print("Step 2: Building email...")
     today_nb = datetime.now().strftime("%-d. %B %Y")
-    subject = f"Dagens Norge · {today_nb}"
+    subject = f"Dagens Norge \u00b7 {today_nb}"
     html = build_html(news)
 
-    print("Step 4: Sending email...")
+    print("Step 3: Sending email...")
     result = send_email(subject, html)
     print(f"  Email sent! ID: {result.get('id')}")
 
