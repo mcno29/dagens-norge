@@ -39,7 +39,7 @@ ANTHROPIC_HEADERS = {
 def fetch_news_json():
     today = datetime.now().strftime("%-d. %B %Y")
     payload = {
-        "model": "claude-sonnet-4-5",
+        "model": "claude-haiku-4-5-20251001",
         "max_tokens": 4000,
         "tools": [{"type": "web_search_20250305", "name": "web_search"}],
         "system": (
