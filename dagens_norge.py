@@ -1,12 +1,11 @@
 """
 Dagens Norge – Daily Norwegian News Digest
 ==========================================
-Fetches the top Norwegian news stories using the Anthropic API,
-formats them into a bilingual (Norwegian + English) HTML email,
-and sends it via Resend.
+Fetches headlines from free RSS feeds (NRK, VG, Aftenposten, Dagbladet, E24),
+passes them to Claude Haiku for ranking and summarising,
+and sends a bilingual HTML email via Resend.
 
-Single API call version: searches and formats JSON in one request
-to avoid rate limit issues.
+No web search tool = near-zero API cost (~$0.01/day).
 
 Setup:
     pip install requests
@@ -20,6 +19,7 @@ Environment variables (set as GitHub Actions secrets):
 import os
 import json
 import requests
+import xml.etree.ElementTree as ET
 from datetime import datetime
 
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
@@ -33,46 +33,100 @@ ANTHROPIC_HEADERS = {
     "content-type": "application/json",
 }
 
+RSS_FEEDS = [
+    ("NRK",         "https://www.nrk.no/toppsaker.rss"),
+    ("VG",          "https://www.vg.no/rss/feed/forsiden/"),
+    ("Aftenposten", "https://www.aftenposten.no/rss"),
+    ("Dagbladet",   "https://www.dagbladet.no/rss/nyheter/"),
+    ("E24",         "https://e24.no/rss"),
+]
 
-# ── Step 1: Search and format in ONE call ─────────────────────────────────────
 
-def fetch_news_json():
+# ── Step 1: Fetch RSS feeds ───────────────────────────────────────────────────
+
+def fetch_rss_headlines():
+    headlines = []
+    for source, url in RSS_FEEDS:
+        try:
+            resp = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+            resp.raise_for_status()
+            root = ET.fromstring(resp.content)
+            # Handle both RSS and Atom namespaces
+            items = root.findall(".//item") or root.findall(".//{http://www.w3.org/2005/Atom}entry")
+            count = 0
+            for item in items[:10]:  # max 10 per source
+                title = (
+                    item.findtext("title") or
+                    item.findtext("{http://www.w3.org/2005/Atom}title") or ""
+                ).strip()
+                link = (
+                    item.findtext("link") or
+                    item.findtext("{http://www.w3.org/2005/Atom}link") or ""
+                ).strip()
+                description = (
+                    item.findtext("description") or
+                    item.findtext("{http://www.w3.org/2005/Atom}summary") or ""
+                ).strip()
+                if title:
+                    headlines.append({
+                        "source": source,
+                        "title": title,
+                        "link": link,
+                        "description": description[:300],  # trim long descriptions
+                    })
+                    count += 1
+            print(f"  {source}: {count} headlines")
+        except Exception as e:
+            print(f"  {source}: failed ({e})")
+    return headlines
+
+
+# ── Step 2: Rank and summarise with Haiku (no web search) ────────────────────
+
+def summarise_with_claude(headlines):
     today = datetime.now().strftime("%-d. %B %Y")
+
+    # Format headlines as a simple text list
+    headlines_text = ""
+    for i, h in enumerate(headlines, 1):
+        headlines_text += f"{i}. [{h['source']}] {h['title']}"
+        if h['description']:
+            headlines_text += f" — {h['description']}"
+        headlines_text += f" (URL: {h['link']})\n"
+
     payload = {
         "model": "claude-haiku-4-5-20251001",
-        "max_tokens": 4000,
-        "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+        "max_tokens": 3000,
         "system": (
-            "You are a Norwegian news editor and JSON serializer. "
-            "After searching for news, you output ONLY a raw JSON object — "
-            "no preamble, no explanation, no markdown, no code fences. "
-            "Your response starts with { and ends with }. "
-            "Use only straight double quotes. Escape any double quotes inside string values with backslash."
+            "You are a JSON serializer. You receive a list of Norwegian news headlines "
+            "and output ONLY a raw JSON object — no preamble, no explanation, no markdown, "
+            "no code fences. Your response starts with { and ends with }. "
+            "Use only straight double quotes. Escape any double quotes inside strings with backslash."
         ),
         "messages": [{
             "role": "user",
             "content": (
-                f"Search for the 6-8 most important Norwegian news stories today, {today}. "
-                "Use web search to find real articles from NRK, Aftenposten, Dagbladet, VG, E24 "
-                "and similar Norwegian sources. Then return ONLY this JSON structure:\n"
+                f"From this list of Norwegian news headlines from today ({today}), "
+                "select the 6-8 most important stories and return ONLY this JSON:\n"
                 '{"date":"' + today + '","stories":[{"rank":1,"headline":"norsk overskrift",'
-                '"summaryNo":"2-3 norske setninger.","summaryEn":"2-3 English sentences.",'
+                '"summaryNo":"2-3 norske setninger som forklarer hva som skjedde og hvorfor det er viktig.",'
+                '"summaryEn":"2-3 English sentences explaining what happened and why it matters.",'
                 '"category":"Politikk","sourceUrl":"https://...","sourceName":"NRK"}]}\n\n'
                 "Categories must be one of: Politikk, Økonomi, Utenriks, Samfunn, Sport, Kultur, Helse, Teknologi\n"
-                "Rank by importance, not recency. Output ONLY the JSON, nothing else."
+                "Rank by importance, not by order in the list. Use the URL from the headline.\n\n"
+                "Headlines:\n" + headlines_text
             )
         }]
     }
+
     response = requests.post(ANTHROPIC_URL, headers=ANTHROPIC_HEADERS, json=payload)
     response.raise_for_status()
     data = response.json()
 
-    # Extract text blocks (skip tool_use blocks)
     text = " ".join(
         block["text"] for block in data["content"] if block["type"] == "text"
     )
 
-    # Robustly extract JSON
     start = text.index("{")
     end = text.rindex("}") + 1
     json_str = text[start:end]
@@ -84,7 +138,7 @@ def fetch_news_json():
         return json.loads(json_str)
 
 
-# ── Step 2: Build HTML email ──────────────────────────────────────────────────
+# ── Step 3: Build HTML email ──────────────────────────────────────────────────
 
 CATEGORY_COLORS = {
     "Politikk": "#2563eb",
@@ -92,7 +146,7 @@ CATEGORY_COLORS = {
     "Utenriks": "#9333ea",
     "Samfunn": "#d97706",
     "Sport": "#dc2626",
-    "Kultur": "#db2777",
+    "Kultur": "#db2477",
     "Helse": "#0891b2",
     "Teknologi": "#4f46e5",
 }
@@ -170,13 +224,13 @@ def build_html(news):
   </td></tr>
   <tr><td style="background:#f5f2ed;padding:20px 36px;border-top:1px solid #e8e4dd;">
     <span style="font-family:Arial,sans-serif;font-size:11px;color:#aaa;">
-      Laget av Claude \u00b7 NRK, Aftenposten, Dagbladet og andre norske kilder</span>
+      Laget av Claude Haiku \u00b7 NRK, VG, Aftenposten, Dagbladet, E24</span>
   </td></tr>
 </table></td></tr></table>
 </body></html>"""
 
 
-# ── Step 3: Send via Resend ───────────────────────────────────────────────────
+# ── Step 4: Send via Resend ───────────────────────────────────────────────────
 
 def send_email(subject, html):
     payload = {
@@ -200,16 +254,20 @@ def send_email(subject, html):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    print("Step 1: Fetching and formatting news (single API call)...")
-    news = fetch_news_json()
+    print("Step 1: Fetching RSS headlines...")
+    headlines = fetch_rss_headlines()
+    print(f"  Total: {len(headlines)} headlines from {len(RSS_FEEDS)} sources.")
+
+    print("Step 2: Ranking and summarising with Claude Haiku...")
+    news = summarise_with_claude(headlines)
     print(f"  Got {len(news['stories'])} stories.")
 
-    print("Step 2: Building email...")
+    print("Step 3: Building email...")
     today_nb = datetime.now().strftime("%-d. %B %Y")
     subject = f"Dagens Norge \u00b7 {today_nb}"
     html = build_html(news)
 
-    print("Step 3: Sending email...")
+    print("Step 4: Sending email...")
     result = send_email(subject, html)
     print(f"  Email sent! ID: {result.get('id')}")
 
