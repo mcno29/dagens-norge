@@ -30,5 +30,13 @@ jobs:
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
         run: python dagens_norge.py
 
-      - name: Keepalive
-        uses: gautamkrishnar/keepalive-workflow@v2
+      - name: Keepalive commit if repo is quiet
+        run: |
+          last=$(git log -1 --format=%ct)
+          now=$(date +%s)
+          if [ $((now - last)) -gt $((45 * 86400)) ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit --allow-empty -m "Keepalive"
+            git push
+          fi
